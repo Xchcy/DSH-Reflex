@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Link & file right-click menu",
+    "description": "Adds a ChatGPT-style right-click menu to links and file references in chat: copy the address or path, open with the default app, and reveal the file in the file explorer."
+  }
+}
