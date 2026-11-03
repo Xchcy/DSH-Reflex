@@ -41,7 +41,7 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 
 ## 配置 / Configuration
 
-`workspaceRoot` 可选。设置后，消息里的**相对路径**会被解析到这个目录，并参与"打开/定位"：
+消息里的**相对路径**（`src/theme.json`、`manifest.json`、`background.js:12`）会按 DSH 的**所有工作区目录**依次尝试解析，所以从其他工作区的对话里右键文件也能正常打开；下面这个 `workspaceRoot` 只是额外优先尝试的目录，可留空：
 
 ```yaml
 # cordis.patch.yml
@@ -49,10 +49,10 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
     - id: link-menu
       name: dsh-link-menu
       config:
-        workspaceRoot: 'C:\Users\me\Documents\my-workspace'
+        workspaceRoot: 'C:\Users\me\Documents\my-workspace'   # 可选
 ```
 
-不设置时依次回退到 DSH 工作目录（`workingDirectory.defaultDirectory`）和 Host 进程的当前目录。
+解析顺序：DSH 冒号列表中的工作区目录（新工作区在前）→ `workspaceRoot` → `workingDirectory.defaultDirectory` → Host 进程当前目录。`/link-menu/resolve` 接口会把解析结果返回给前端，用于"复制文件路径"。
 
 卸载：用 `plugin_manager` 移除该 bundle，或在 profile 的 `cordis.patch.yml` 里删掉 `link-menu` 条目。
 
@@ -67,7 +67,7 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 插件依赖 DSH 客户端的两处实现细节：
 
 1. 消息内链接/文件引用带 `fileLink` 类名（外链是 `<a>`，文件引用是 `<button>`）；
-2. Host 侧可用 `webServer` 与 `workingDirectory` 服务。
+2. Host 侧可用 `webServer`、`workingDirectory` 与 `workspaceRegistry` 服务。
 
 测试于 2026-11 的 DSH 桌面版。DSH 大版本更新后若类名或槽位命名变化，可能需要在 `client.js` / `index.js` 中同步调整。
 
@@ -76,7 +76,7 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 包结构：
 
 ```text
-index.js           Host 半边：/link-menu/open（打开/定位）、/link-menu/info（解析根目录）
+index.js           Host 半边：/link-menu/open（打开/定位）、/link-menu/resolve（跨工作区解析路径）、/link-menu/info（解析根目录）
 client.js          浏览器半边：捕获右键、识别链接/文件、绘制菜单
 locale/*.json      插件名称与描述
 cordis.patch.yml   挂载配置

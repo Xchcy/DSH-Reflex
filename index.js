@@ -1,27 +1,33 @@
 import { spawn } from 'node:child_process';
 import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
  * Host half of the message right-click menu.
  *
  * The browser can copy a link or a path on its own, but it cannot hand a local
- * file to the operating system. This plugin exposes two JSON routes:
+ * file to the operating system. This plugin exposes these JSON routes:
  *
- *   POST /link-menu/open   { kind: 'url' | 'file' | 'reveal', target }
- *   GET  /link-menu/info   base directory for relative references
+ *   POST /link-menu/open      { kind: 'url' | 'file' | 'reveal', target }
+ *   GET  /link-menu/resolve   ?path=...  → absolute path for a file reference
+ *   GET  /link-menu/info      base directory for relative references
  *
- * Opening is restricted to http(s)/mailto URLs and to absolute paths that
- * actually exist, and the OS launcher is invoked with an argument array (never
- * a shell string), so a page cannot smuggle extra commands through `target`.
+ * A relative reference is resolved against every known workspace directory, so
+ * a file reference from another workspace still opens. Opening is restricted to
+ * http(s)/mailto URLs and to paths that actually exist, and the OS launcher is
+ * invoked with an argument array (never a shell string), so a page cannot
+ * smuggle extra commands through `target`.
  */
 
 /** Host services this plugin needs. */
-export const inject = ['webServer', 'workingDirectory'];
+export const inject = ['webServer', 'workingDirectory', 'workspaceRegistry'];
 
 /** Route that launches the operating system's default handler. */
 const OPEN_ROUTE = '/link-menu/open';
+/** Route that resolves a relative file reference to an absolute path. */
+const RESOLVE_ROUTE = '/link-menu/resolve';
 /** Route that reports where relative references resolve from. */
 const INFO_ROUTE = '/link-menu/info';
 
@@ -84,6 +90,64 @@ function resolvePath(target) {
   return PATH_PATTERN.test(value) ? value : undefined;
 }
 
+/** Candidate base directories for a relative reference, most useful first. */
+function candidateRoots(ctx) {
+  const roots = [];
+  const push = (value) => {
+    if (typeof value !== 'string') return;
+    const root = value.trim().replace(/[\\/]+$/, '');
+    if (root.length === 0 || !PATH_PATTERN.test(root)) return;
+    if (!roots.includes(root)) roots.push(root);
+  };
+  // Durable workspace order: a newly created workspace is prepended, so the
+  // workspace the user is most likely looking at is tried first.
+  try {
+    for (const workspace of ctx?.workspaceRegistry?.list?.() ?? []) push(workspace?.path);
+  } catch {
+    // registry optional
+  }
+  push(configuredRoot);
+  try {
+    push(ctx?.workingDirectory?.defaultDirectory);
+  } catch {
+    // optional
+  }
+  push(process.cwd());
+  return roots;
+}
+
+/**
+ * Resolve a file reference that may be absolute, a `file://` URL, or a path
+ * relative to one of the known workspace directories.
+ * @returns {Promise<string | undefined>} an absolute path that exists.
+ */
+async function resolveLoosePath(ctx, target) {
+  if (typeof target !== 'string') return undefined;
+  const value = target.trim().replace(/^["'`]+|["'`]+$/g, '');
+  if (value.length === 0 || value.length > MAX_TARGET_LENGTH) return undefined;
+  if (/[\u0000-\u001f]/.test(value)) return undefined;
+  const absolute = resolvePath(value);
+  if (absolute !== undefined) {
+    try {
+      await stat(absolute);
+      return absolute;
+    } catch {
+      return undefined;
+    }
+  }
+  const relative = value.replace(/:\d+(?::\d+)?$/, '').replace(/^\.?[\\/]+/, '');
+  for (const root of candidateRoots(ctx)) {
+    const candidate = join(root, relative);
+    try {
+      await stat(candidate);
+      return candidate;
+    } catch {
+      // try the next candidate root
+    }
+  }
+  return undefined;
+}
+
 /** Start a detached, fire-and-forget process. */
 function launch(command, args) {
   const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
@@ -116,7 +180,7 @@ async function openPath(kind, target) {
 }
 
 /** Handle POST /link-menu/open. */
-async function handleOpen(req, res) {
+async function handleOpen(req, res, ctx) {
   if (req.method !== 'POST') {
     json(res, 405, { ok: false, error: 'method-not-allowed' });
     return;
@@ -140,14 +204,47 @@ async function handleOpen(req, res) {
     return;
   }
   try {
-    if (kind === 'url') openUrl(target);
-    else await openPath(kind, target);
+    if (kind === 'url') {
+      openUrl(target);
+    } else {
+      const resolved = await resolveLoosePath(ctx, target);
+      if (resolved === undefined) {
+        json(res, 404, { ok: false, error: 'not-found' });
+        return;
+      }
+      await openPath(kind, resolved);
+    }
     res.writeHead(204, { 'cache-control': 'no-store' });
     res.end();
   } catch (error) {
     const code = error?.code === 'ENOENT' ? 'not-found' : String(error?.message ?? 'failed');
     json(res, 400, { ok: false, error: code });
   }
+}
+
+/** Handle GET/POST /link-menu/resolve: absolute path for one file reference. */
+async function handleResolve(req, res, ctx) {
+  let target = '';
+  try {
+    if (req.method === 'POST') {
+      const payload = JSON.parse((await readBody(req, MAX_BODY_BYTES)) || '{}');
+      target = typeof payload?.path === 'string' ? payload.path : '';
+    } else if (req.method === 'GET') {
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      target = url.searchParams.get('path') ?? '';
+    } else {
+      json(res, 405, { ok: false, error: 'method-not-allowed' });
+      return;
+    }
+  } catch {
+    target = '';
+  }
+  const resolved = await resolveLoosePath(ctx, target);
+  if (resolved === undefined) {
+    json(res, 404, { ok: false, error: 'not-found' });
+    return;
+  }
+  json(res, 200, { ok: true, path: resolved });
 }
 
 /** Handle GET /link-menu/info: the base directory of relative references. */
@@ -185,8 +282,12 @@ export function apply(ctx, config) {
     configuredRoot = PATH_PATTERN.test(root) ? root : '';
   }
   ctx.effect(
-    () => ctx.webServer.register({ kind: 'exact', path: OPEN_ROUTE, handler: (req, res) => handleOpen(req, res) }),
+    () => ctx.webServer.register({ kind: 'exact', path: OPEN_ROUTE, handler: (req, res) => handleOpen(req, res, ctx) }),
     'link-menu: open route',
+  );
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'exact', path: RESOLVE_ROUTE, handler: (req, res) => handleResolve(req, res, ctx) }),
+    'link-menu: resolve route',
   );
   ctx.effect(
     () => ctx.webServer.register({ kind: 'exact', path: INFO_ROUTE, handler: (req, res) => handleInfo(req, res, ctx) }),

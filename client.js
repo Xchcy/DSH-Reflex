@@ -5,6 +5,8 @@ window.__ModuleLoader__.load({
     const NS = 'link-menu';
     /** Host route that launches the OS default handler. */
     const OPEN_ROUTE = '/link-menu/open';
+    /** Host route that resolves a file reference against every known workspace. */
+    const RESOLVE_ROUTE = '/link-menu/resolve';
     /** Host route that reports where relative references resolve from. */
     const INFO_ROUTE = '/link-menu/info';
     /** Shipped chat reference chip: links and file references share one hashed class. */
@@ -18,6 +20,8 @@ window.__ModuleLoader__.load({
     const WEB_URL = /^(?:https?:\/\/|mailto:)/i;
     /** `path/to/file.ext` or `path/to/file.ext:12` as plain text. */
     const REL_PATH = /^(?:[\w.@+-]+[\\/])+[\w.@+ -]*[\w.@+-]+(?:\.[A-Za-z0-9]{1,10})?(?::\d+(?::\d+)?)?$/;
+    /** A bare file name such as `manifest.json` or `background.js:12`. */
+    const BARE_FILE = /^[\w.@+-]+(?:\.[A-Za-z0-9]{1,10})(?::\d+(?::\d+)?)?$/;
     /** Trailing `:line` / `:line:col` in a reference. */
     const LINE_SUFFIX = /:\d+(?::\d+)?$/;
 
@@ -129,6 +133,9 @@ window.__ModuleLoader__.load({
           if (found) return found;
           if (WEB_URL.test(text)) return { kind: 'url', target: text };
           if (REL_PATH.test(text) && !/^[a-z]+:\/\//i.test(text)) {
+            return { kind: 'relpath', target: stripLineSuffix(text) };
+          }
+          if (BARE_FILE.test(text)) {
             return { kind: 'relpath', target: stripLineSuffix(text) };
           }
         }
@@ -280,17 +287,29 @@ window.__ModuleLoader__.load({
       return root.endsWith(separator) ? `${root}${cleaned}` : `${root}${separator}${cleaned}`;
     }
 
-    /** Absolute path for a relative reference, or the reference itself when unknown. */
+    /**
+     * Absolute path for a relative reference. The Host resolves it against
+     * every known workspace directory, so a reference from another workspace
+     * still resolves; the old info + join fallback only runs when that route is
+     * unavailable (older Host half).
+     */
     async function resolveRelative(relative) {
+      try {
+        const response = await fetch(RESOLVE_ROUTE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path: relative }),
+          cache: 'no-store',
+        });
+        if (response.ok) {
+          const payload = await response.json();
+          if (payload && typeof payload.path === 'string' && payload.path.length > 0) return payload.path;
+        }
+      } catch {
+        // fall through to the local fallback
+      }
       const root = await baseDirectory();
       return root ? joinPath(root, relative) : relative;
-    }
-
-    /** Open a relative reference through its absolute location. */
-    async function openRelative(kind, relative) {
-      const absolute = await resolveRelative(relative);
-      if (absolute === relative) throw new Error('workspace-root-unavailable');
-      await openTarget(kind, absolute);
     }
 
     /** Close the open menu, if any. */
@@ -336,8 +355,8 @@ window.__ModuleLoader__.load({
       if (target.kind === 'relpath') {
         const relative = stripLineSuffix(target.target);
         return [
-          menuItem(t('openDefault'), () => openRelative('file', relative)),
-          menuItem(t('reveal'), () => openRelative('reveal', relative)),
+          menuItem(t('openDefault'), () => openTarget('file', relative)),
+          menuItem(t('reveal'), () => openTarget('reveal', relative)),
           menuItem(t('copyPath'), async () => copyText(await resolveRelative(relative))),
         ];
       }
