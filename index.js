@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -136,13 +136,36 @@ async function resolveLoosePath(ctx, target) {
     }
   }
   const relative = value.replace(/:\d+(?::\d+)?$/, '').replace(/^\.?[\\/]+/, '');
-  for (const root of candidateRoots(ctx)) {
+  const roots = candidateRoots(ctx);
+  for (const root of roots) {
     const candidate = join(root, relative);
     try {
       await stat(candidate);
       return candidate;
     } catch {
       // try the next candidate root
+    }
+  }
+  // A chip may show only a bare file name while the file sits in a subdirectory
+  // of the workspace: look one directory level down before giving up.
+  if (!/[\\/]/.test(relative)) {
+    for (const root of roots) {
+      let entries;
+      try {
+        entries = await readdir(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const candidate = join(root, entry.name, relative);
+        try {
+          await stat(candidate);
+          return candidate;
+        } catch {
+          // keep scanning this root
+        }
+      }
     }
   }
   return undefined;
