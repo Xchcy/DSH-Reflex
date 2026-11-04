@@ -95,6 +95,7 @@ client.js          浏览器半边：捕获右键、识别链接/文件、绘制
 locale/*.json      插件名称与描述（plugin_manager 展示用）
 cordis.patch.yml   挂载配置
 build.mjs          打包脚本，生成 dist/dsh-link-menu-<version>.zip
+test/host-routes.mjs  Host 路由冒烟测试（只测拒绝路径，不启动任何应用）
 ```
 
 改动后先查语法：
@@ -102,6 +103,7 @@ build.mjs          打包脚本，生成 dist/dsh-link-menu-<version>.zip
 ```powershell
 node --check index.js
 node --check client.js
+node test/host-routes.mjs
 ```
 
 Host 半边改动可在 DSH 里 `plugin_manager set_plugin`（`include:link-menu` 关→开）热重载；client 半边改动需要重启应用。

@@ -1,0 +1,4 @@
+# Keep the working tree byte-identical on every checkout so `node build.mjs`
+# stays reproducible. Archives are binary.
+* text=auto eol=lf
+*.zip binary

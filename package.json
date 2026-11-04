@@ -26,7 +26,8 @@
     "icon.svg"
   ],
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "test": "node test/host-routes.mjs"
   },
   "dsh": {
     "bundle": {
