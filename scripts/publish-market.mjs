@@ -51,10 +51,18 @@ if (!process.env.NODE_USE_ENV_PROXY) {
         env: { ...process.env, NODE_USE_ENV_PROXY: '1', HTTPS_PROXY: proxy, HTTP_PROXY: proxy },
       },
     );
-    process.exit(r.status ?? 1);
+    await finish(r.status ?? 1);
   }
 }
 
+/* Exit cleanly: process.exit() straight after a fetch trips a libuv
+   async-handle assertion on Windows (Node 24), turning a real exit code into an
+   abort. Waiting one macrotask lets undici close its sockets, then exit. */
+async function finish(code) {
+  process.exitCode = code;
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  process.exit(code);
+}
 function systemProxy() {
   if (process.platform !== 'win32') return '';
   try {
@@ -91,7 +99,7 @@ if (!token) {
   console.error(
     'No GitHub token. Set GITHUB_TOKEN, or sign in once with `git push` so Git Credential Manager stores one.',
   );
-  process.exit(1);
+  await finish(1);
 }
 
 /* -------------------------------------------------------------------- api */
@@ -137,7 +145,7 @@ if (!/^  en: "/m.test(entry)) problems.push('description.en must be quoted (it c
 if (problems.length) {
   console.error(`market/${'Xchcy__DSH-Reflex.yml'} is not submission-ready:`);
   for (const p of problems) console.error(`  - ${p}`);
-  process.exit(1);
+  await finish(1);
 }
 
 /* ------------------------------------------------------------- repository */
@@ -152,7 +160,7 @@ if (ageDays < MIN_AGE_DAYS && !force) {
       `earliest submission: ${ready.toISOString()} (${ready.toLocaleString()})\n` +
       `re-run then, or pass --force to submit anyway (CI will fail on the age gate).`,
   );
-  process.exit(2);
+  await finish(2);
 }
 
 if (!(repo.topics ?? []).includes('dsh-plugin')) {
@@ -176,7 +184,7 @@ if (!fork) {
   if (dryRun) {
     console.log(`[dry-run] would fork ${UPSTREAM.owner}/${UPSTREAM.repo}, then commit ${ENTRY_PATH} and open a PR`);
     console.log('\n--- entry ---\n' + entry);
-    process.exit(0);
+    await finish(0);
   } else {
     console.log(`forking ${UPSTREAM.owner}/${UPSTREAM.repo} ...`);
     await api('POST', `/repos/${UPSTREAM.owner}/${UPSTREAM.repo}/forks`, { default_branch_only: true });
@@ -252,7 +260,7 @@ const head = `${FORK.owner}:${BRANCH}`;
 const open = await api('GET', `/repos/${UPSTREAM.owner}/${UPSTREAM.repo}/pulls?state=open&head=${encodeURIComponent(head)}`);
 if (open.length) {
   console.log(`PR already open: ${open[0].html_url}`);
-  process.exit(0);
+  await finish(0);
 }
 
 const body = [
@@ -277,7 +285,7 @@ const body = [
 
 if (dryRun) {
   console.log(`[dry-run] would open PR ${head} -> ${BASE}\n\n${body}`);
-  process.exit(0);
+  await finish(0);
 }
 
 const pr = await api('POST', `/repos/${UPSTREAM.owner}/${UPSTREAM.repo}/pulls`, {
@@ -287,3 +295,4 @@ const pr = await api('POST', `/repos/${UPSTREAM.owner}/${UPSTREAM.repo}/pulls`, 
   body,
 });
 console.log(`PR opened: ${pr.html_url}`);
+
