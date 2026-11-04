@@ -13,12 +13,22 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 | 对象 / Target | 菜单项 / Menu items |
 | --- | --- |
 | 网页链接（`https://…`、`mailto:`） | 复制链接地址 · 在默认浏览器中打开 |
-| 文件引用（`C:\…\file.txt`、`file:///…`） | 默认打开方式 · 在文件管理器中打开 · 复制文件地址 · 复制文件名 |
+| 文件引用（`C:\…\file.txt`、`file:///…`） | 默认打开方式 · 打开方式… · 在文件管理器中打开 · 复制文件地址 · 复制文件名 · 复制文件内容 · 另存为… |
 | 相对文件引用（如 `src/main.ts`） | 同上，按 DSH 工作区解析成绝对路径 |
 
 - 左键行为保持不变：链接照常在内置浏览器打开，文件引用照常定位。
 - 只在真正命中链接/文件引用时接管右键；普通文本仍是系统默认菜单。
+- 能识别消息里的文件卡片、变更文件列表行、带中文/空格的文件名，以及聊天上传的附件（不在工作区里也能解析）。
 - 菜单跟随主题变量（`--dsw-*`），浅色/深色主题都能用。
+
+## 0.3.0 的改动 / What's new in 0.3.0
+
+- 文件菜单扩展到 7 行：新增 **打开方式…**（系统「选择应用」对话框）、**复制文件内容**、**另存为…**。
+- 「复制文件内容」走 Host 读取 UTF-8 文本：上限 2 MB，二进制文件（前 8 KB 含 NUL 字节）直接拒绝并提示，不会把乱码塞进剪贴板。
+- 「另存为…」弹系统保存对话框，把原文件复制到用户选的位置；取消时提示「已取消另存」。
+- 识别更准：支持文件卡片（`data-presented-file` 里的预览按钮标题）、变更文件列表行（`data-review-file`）、`fileMention` / `fileCard` 类名 chip，以及 `打开 C:\a\b.txt` 这种路径藏在标签后的写法。
+- 路径正则放宽到任意 Unicode 文件名（中文、空格、`#` 等），裸文件名会再到聊天附件目录里找一/两层。
+- `/link-menu/resolve` 新增 POST 形式（`{ path }`），旧的 GET `?path=` 保留。
 
 ## 0.2.1 的改动 / What's new in 0.2.1
 
@@ -47,7 +57,7 @@ DSH 桌面版的 **Plugins → Discover** 里搜索 `dsh-link-menu` 或 `Xchcy`�
 ```sh
 dsh plugin add github:Xchcy/DSH-Reflex
 # 钉住版本
-dsh plugin add github:Xchcy/DSH-Reflex#v0.2.1
+dsh plugin add github:Xchcy/DSH-Reflex#v0.3.0
 ```
 
 git 源首次安装需要按提示允许构建；也可以在 GUI 的 Plugins 页面粘贴仓库地址安装。
@@ -87,14 +97,14 @@ git 源首次安装需要按提示允许构建；也可以在 GUI 的 Plugins �
 ## 安全边界 / Safety
 
 - 只处理 `http(s)`、`mailto:` 链接与**真实存在**的本地文件；其他目标不弹菜单，也不发给 Host。
-- Host 端用参数数组启动系统打开方式，不经过 shell，不拼接命令字符串。
-- 插件不读取文件内容，只把路径交给系统「打开 / 定位」。
+- Host 端用参数数组启动系统打开方式与保存对话框，不经过 shell，不拼接命令字符串。
+- 「复制文件内容」会在 Host 端读取该文本文件（上限 2 MB、二进制拒绝），只用于剪贴板；「另存为…」把文件复制到用户在系统对话框里选的位置。除此之外插件不读取文件内容。
 
 ## 兼容性 / Compatibility
 
 插件依赖 DSH 客户端的两处实现细节：
 
-1. 消息内链接/文件引用带 `fileLink` 类名（外链是 `<a>`，文件引用是 `<button>`，文件引用的 `title` 是绝对路径）；
+1. 消息内链接/文件引用带 `fileLink` 类名（外链是 `<a>`，文件引用是 `<button>`，文件引用的 `title` 是绝对路径，另有 `fileMention` / `fileCard` chip、`data-presented-file` 卡片、`data-review-file` 变更行）；
 2. Host 侧可用 `webServer`、`workingDirectory` 与 `workspaceRegistry` 服务。
 
 测试于 2026-11 的 DSH 桌面版。DSH 大版本更新后若类名或槽位命名变化，可能需要在 `client.js` / `index.js` 中同步调整。
@@ -104,12 +114,12 @@ git 源首次安装需要按提示允许构建；也可以在 GUI 的 Plugins �
 包结构：
 
 ```text
-index.js           Host 半边：/link-menu/open（打开/定位）、/link-menu/resolve（跨工作区解析路径）、/link-menu/info（解析根目录与 VS Code 探测）
+index.js           Host 半边：/link-menu/open（打开/定位）、/link-menu/resolve（跨工作区解析路径）、/link-menu/info（解析根目录与 VS Code 探测）、/link-menu/read（读文本内容）、/link-menu/save-as（系统另存对话框）
 client.js          浏览器半边：捕获右键、识别链接/文件、绘制菜单
 locale/*.json      插件名称与描述（plugin_manager 展示用）
 cordis.patch.yml   挂载配置
 build.mjs          打包脚本，生成 dist/dsh-link-menu-<version>.zip
-test/host-routes.mjs  Host 路由冒烟测试（只测拒绝路径，不启动任何应用）
+test/host-routes.mjs  Host 路由冒烟测试（24 项断言，只测拒绝路径，不启动任何应用/对话框）
 market/            插件市场（awesome-dsh-plugin）的收录条目
 scripts/publish-market.mjs  提交收录条目并开 PR 的脚本
 ```

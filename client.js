@@ -9,8 +9,10 @@ window.__ModuleLoader__.load({
     const RESOLVE_ROUTE = '/link-menu/resolve';
     /** Host route that reports where relative references resolve from. */
     const INFO_ROUTE = '/link-menu/info';
-    /** Shipped chat reference chip: links and file references share one hashed class. */
-    const FILE_LINK = /fileLink/;
+    /** Host route that returns a text file's content. */
+    const READ_ROUTE = '/link-menu/read';
+    /** Host route that copies a file through the system save dialog. */
+    const SAVE_ROUTE = '/link-menu/save-as';
 
     /** Windows drive, UNC share, or POSIX absolute path. */
     const ABS_PATH = /^(?:[A-Za-z]:[\\/]|\\\\[^\\]|\/(?:Users|home|root|mnt|opt|var|tmp|usr|etc|private|Volumes)\/)/;
@@ -18,10 +20,12 @@ window.__ModuleLoader__.load({
     const FILE_URL = /^file:\/\//i;
     /** Web URL or mail address. */
     const WEB_URL = /^(?:https?:\/\/|mailto:)/i;
-    /** `path/to/file.ext` or `path/to/file.ext:12` as plain text. */
-    const REL_PATH = /^(?:[\w.@+-]+[\\/])+[\w.@+ -]*[\w.@+-]+(?:\.[A-Za-z0-9]{1,10})?(?::\d+(?::\d+)?)?$/;
-    /** A bare file name such as `manifest.json` or `background.js:12`. */
-    const BARE_FILE = /^[\w.@+-]+(?:\.[A-Za-z0-9]{1,10})(?::\d+(?::\d+)?)?$/;
+    /** `path/to/file.ext` or `path/to/file.ext:12` as plain text (any script). */
+    const REL_PATH = /^(?:[^\s\\/:*?"<>|]+[\\/])+[^\s\\/:*?"<>|]+(?:\.[A-Za-z0-9]{1,10})?(?::\d+(?::\d+)?)?$/;
+    /** A bare file name such as `manifest.json`, `设计稿.pdf`, or `background.js:12`. */
+    const BARE_FILE = /^[^\s\\/:*?"<>|]+(?:\.[A-Za-z0-9]{1,10})(?::\d+(?::\d+)?)?$/;
+    /** An absolute path embedded behind a label, e.g. `打开 C:\a\b.txt`. */
+    const EMBEDDED_PATH = /[A-Za-z]:[\\/][^<>:"|?*\r\n]*$/;
     /** Trailing `:line` / `:line:col` in a reference. */
     const LINE_SUFFIX = /:\d+(?::\d+)?$/;
 
@@ -29,29 +33,41 @@ window.__ModuleLoader__.load({
       copyLink: '复制链接地址',
       openExternal: '在默认浏览器中打开',
       openDefault: '默认打开方式',
+      openWith: '打开方式…',
       reveal: '在文件管理器中打开',
       copyPath: '复制文件地址',
       copyName: '复制文件名',
+      copyContent: '复制文件内容',
+      saveAs: '另存为…',
       openFailed: '无法打开',
       opened: '已用默认应用打开',
       openedCode: '已用 VS Code 打开',
       revealed: '已在资源管理器中打开',
       choosing: '已打开「选择打开方式」',
       copied: '已复制',
+      savedTo: '已另存为',
+      saveCancelled: '已取消另存',
+      contentFailed: '无法读取文件内容',
     };
     const en = {
       copyLink: 'Copy link address',
       openExternal: 'Open in default browser',
       openDefault: 'Open with default app',
+      openWith: 'Open with…',
       reveal: 'Show in file explorer',
       copyPath: 'Copy file path',
       copyName: 'Copy file name',
+      copyContent: 'Copy file content',
+      saveAs: 'Save a copy…',
       openFailed: 'Could not open',
       opened: 'Opened with the default app',
       openedCode: 'Opened with VS Code',
       revealed: 'Shown in File Explorer',
       choosing: 'Opened the “choose an app” dialog',
       copied: 'Copied',
+      savedTo: 'Saved as',
+      saveCancelled: 'Save cancelled',
+      contentFailed: 'Could not read the file content',
     };
 
     /**
@@ -161,34 +177,71 @@ window.__ModuleLoader__.load({
       return null;
     }
 
-    /** Look at one element for a link or a file reference. */
+    /**
+     * Read a path that sits behind a label, e.g. `打开 C:\a\b.txt`. Only used on
+     * attributes of a shipped clickable chip, never on free prose.
+     */
+    function pathFromEmbedded(value) {
+      if (typeof value !== 'string' || value.length === 0 || value.length > 4096) return null;
+      const embedded = value.match(EMBEDDED_PATH);
+      if (!embedded || embedded[0].length <= 3) return null;
+      return { kind: 'file', target: stripLineSuffix(embedded[0].trim()) };
+    }
+
+    /** Read a candidate relative file reference from an attribute value. */
+    function relativeFrom(value) {
+      if (typeof value !== 'string') return null;
+      const text = value.trim().replace(/^[`"']+|[`"']+$/g, '');
+      if (text.length === 0 || text.length > 900) return null;
+      if (/^[a-z]+:\/\//i.test(text)) return null;
+      if (REL_PATH.test(text)) return { kind: 'relpath', target: stripLineSuffix(text) };
+      if (BARE_FILE.test(text)) return { kind: 'relpath', target: stripLineSuffix(text) };
+      // `在侧边栏打开 ocs-config.json`: the file name is the last token.
+      const tail = text.split(/[\s"'`]+/).filter((part) => part.length > 0).pop();
+      if (tail && tail !== text && BARE_FILE.test(tail)) {
+        return { kind: 'relpath', target: stripLineSuffix(tail) };
+      }
+      return null;
+    }
+
+    /** Chips the chat renders as clickable file references. */
+    const CHIP_SELECTOR = '[class*="fileLink"],[class*="fileMention"],[class*="fileCard"]';
+
+    /**
+     * Describe what was right-clicked, but only for elements the chat renders as
+     * clickable references. Ordinary prose — error text that quotes a path, a
+     * plain sentence ending in `.md` — must never be hijacked, so nothing here
+     * scans arbitrary text nodes or attributes outside those containers.
+     */
     function probeElement(element) {
       if (!(element instanceof Element)) return null;
-      const className = typeof element.className === 'string' ? element.className : '';
-      if (FILE_LINK.test(className)) {
-        // The shipped chip carries the authored absolute path in `title`, which
-        // is more precise than the visible (possibly bare) file name.
-        for (const name of ['title', 'data-path', 'data-file-path', 'aria-label']) {
-          const value = element.getAttribute(name);
-          if (!value) continue;
-          const found = pathFrom(value);
+      // A delivered file card only exposes its path in the title of the
+      // full-card preview button: `<button class="...cardPreview" title="<abs path>">`.
+      const presented = element.closest('[data-presented-file]');
+      if (presented) {
+        const titled = presented.querySelector('button[title]') ?? presented.querySelector('[title]');
+        const values = [
+          titled?.getAttribute('title'),
+          titled?.getAttribute('aria-label'),
+          presented.getAttribute('title'),
+          presented.getAttribute('aria-label'),
+        ];
+        for (const value of values) {
+          const found = pathFrom(value) ?? pathFromEmbedded(value) ?? relativeFrom(value);
           if (found) return found;
         }
-        const text = (element.textContent ?? '').trim();
-        if (text.length > 0 && text.length < 4096 && !text.includes('\n')) {
-          const found = pathFrom(text);
-          if (found) return found;
-          if (WEB_URL.test(text)) return { kind: 'url', target: text };
-          if (REL_PATH.test(text) && !/^[a-z]+:\/\//i.test(text)) {
-            return { kind: 'relpath', target: stripLineSuffix(text) };
-          }
-          if (BARE_FILE.test(text)) {
-            return { kind: 'relpath', target: stripLineSuffix(text) };
-          }
-        }
+        return null;
       }
-      if (element.tagName === 'A') {
-        const href = element.getAttribute('href');
+      // The changed-files review rows carry the workspace-relative path inline.
+      const review = element.closest('[data-review-file]');
+      if (review) {
+        const value = review.getAttribute('data-review-file');
+        return pathFrom(value) ?? relativeFrom(value);
+      }
+      // Plain links.
+      const anchor = element.closest('a[href]');
+      if (anchor) {
+        const href = anchor.getAttribute('href');
         if (href) {
           if (FILE_URL.test(href)) return { kind: 'file', target: href };
           try {
@@ -197,38 +250,33 @@ window.__ModuleLoader__.load({
           } catch {
             // not a URL we can resolve
           }
+          if (REL_PATH.test(href) && /\.[A-Za-z0-9]{1,10}$/.test(href)) {
+            return { kind: 'relpath', target: stripLineSuffix(href) };
+          }
         }
+        const label = anchor.getAttribute('title') ?? anchor.getAttribute('aria-label');
+        const fromLabel = pathFrom(label) ?? pathFromEmbedded(label) ?? relativeFrom(label);
+        if (fromLabel) return fromLabel;
       }
-      for (const name of element.getAttributeNames()) {
-        if (name === 'href') continue;
-        if (!/path|file|href|title|aria-label|data-/i.test(name)) continue;
-        const found = pathFrom(element.getAttribute(name));
-        if (found) return found;
-      }
-      for (const key of Object.keys(element.dataset ?? {})) {
-        if (!/path|file|href|target|location/i.test(key)) continue;
-        const found = pathFrom(element.dataset[key]);
-        if (found) return found;
-      }
-      const isLeaf = element.childElementCount === 0;
-      if (isLeaf) {
-        const text = (element.textContent ?? '').trim();
-        if (text.length > 0 && text.length < 400 && !text.includes('\n')) {
+      // A file chip keeps the authored path in an attribute; its visible text is
+      // only the fallback (and often just the bare file name).
+      const chip = element.closest(CHIP_SELECTOR);
+      if (chip) {
+        for (const name of ['title', 'data-path', 'data-file-path', 'aria-label']) {
+          const value = chip.getAttribute(name);
+          if (!value) continue;
+          const found = pathFrom(value) ?? pathFromEmbedded(value) ?? relativeFrom(value);
+          if (found) return found;
+        }
+        const text = (chip.textContent ?? '').trim();
+        if (text.length > 0 && text.length < 4096 && !text.includes('\n')) {
           const found = pathFrom(text);
           if (found) return found;
-          if (REL_PATH.test(text) && !/^[a-z]+:\/\//i.test(text)) {
-            return { kind: 'relpath', target: stripLineSuffix(text) };
-          }
-          // A file chip may render as an inline `code` element (or a plain
-          // clickable span) that shows only the bare file name.
-          if (
-            BARE_FILE.test(text) &&
-            text.length <= 120 &&
-            (element.tagName === 'CODE' || element.closest('button,a,[role="button"]'))
-          ) {
-            return { kind: 'relpath', target: stripLineSuffix(text) };
-          }
+          if (WEB_URL.test(text)) return { kind: 'url', target: text };
+          const relative = relativeFrom(text);
+          if (relative) return relative;
         }
+        return null;
       }
       return null;
     }
@@ -298,6 +346,46 @@ window.__ModuleLoader__.load({
       } catch (error) {
         toast(status === 0 ? t('openFailed') : `${t('openFailed')} (${status})`);
         console.warn(`[link-menu] ${t('openFailed')}`, error);
+      }
+    }
+
+    /** Copy a text file's content through the Host. */
+    async function copyFileContent(target) {
+      let status = 0;
+      try {
+        const response = await fetch(READ_ROUTE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ target }),
+          cache: 'no-store',
+        });
+        status = response.status;
+        if (!response.ok) throw new Error(`read failed: ${status}`);
+        const payload = await response.json();
+        await copyText(typeof payload?.text === 'string' ? payload.text : '');
+      } catch (error) {
+        toast(t('contentFailed'));
+        console.warn(`[link-menu] ${t('contentFailed')}`, status, error);
+      }
+    }
+
+    /** Copy a file to a destination the user picks in the system save dialog. */
+    async function saveFileAs(target) {
+      try {
+        const response = await fetch(SAVE_ROUTE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ target }),
+          cache: 'no-store',
+        });
+        if (!response.ok) throw new Error(`save failed: ${response.status}`);
+        const payload = await response.json();
+        if (payload?.saved) toast(`${t('savedTo')} ${baseName(payload.path ?? '')}`);
+        else if (payload?.cancelled) toast(t('saveCancelled'));
+        else toast(t('contentFailed'));
+      } catch (error) {
+        toast(t('contentFailed'));
+        console.warn('[link-menu] save-as failed', error);
       }
     }
 
@@ -407,12 +495,16 @@ window.__ModuleLoader__.load({
       return item;
     }
 
-    /** The three rows every file reference shares; the caller appends "copy file name". */
-    function fileRows(target, absoluteCopy) {
+    /** The rows every file reference shares. */
+    function fileRows(target, absoluteCopy, nameCopy) {
       return [
         menuItem(t('openDefault'), () => openTarget('file', target)),
+        menuItem(t('openWith'), () => openTarget('choose', target)),
         menuItem(t('reveal'), () => openTarget('reveal', target)),
         menuItem(t('copyPath'), absoluteCopy),
+        menuItem(t('copyName'), nameCopy),
+        menuItem(t('copyContent'), () => copyFileContent(target)),
+        menuItem(t('saveAs'), () => saveFileAs(target)),
       ];
     }
 
@@ -425,17 +517,19 @@ window.__ModuleLoader__.load({
         ];
       }
       if (target.kind === 'file') {
-        return [
-          ...fileRows(target.target, () => copyText(displayPath(target.target))),
-          menuItem(t('copyName'), () => copyText(baseName(target.target))),
-        ];
+        return fileRows(
+          target.target,
+          () => copyText(displayPath(target.target)),
+          () => copyText(baseName(target.target)),
+        );
       }
       if (target.kind === 'relpath') {
         const relative = target.target;
-        return [
-          ...fileRows(relative, async () => copyText(await resolveRelative(relative))),
-          menuItem(t('copyName'), () => copyText(baseName(relative))),
-        ];
+        return fileRows(
+          relative,
+          async () => copyText(await resolveRelative(relative)),
+          () => copyText(baseName(relative)),
+        );
       }
       return [menuItem(t('copyPath'), () => copyText(target.target))];
     }

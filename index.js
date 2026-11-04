@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readdir, stat } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,8 +11,10 @@ import { fileURLToPath } from 'node:url';
  * The browser can copy a link or a path on its own, but it cannot hand a local
  * file to the operating system. This plugin exposes these JSON routes:
  *
- *   POST /link-menu/open      { kind: 'url' | 'file' | 'reveal', target }
- *   GET  /link-menu/resolve   ?path=...  → absolute path for a file reference
+ *   POST /link-menu/open      { kind: 'url' | 'file' | 'reveal' | 'code' | 'choose', target }
+ *   POST /link-menu/resolve   { path }   → absolute path for a file reference
+ *   POST /link-menu/read      { target } → UTF-8 text of a text file
+ *   POST /link-menu/save-as   { target } → copy a file through the system save dialog
  *   GET  /link-menu/info      base directory for relative references
  *
  * A relative reference is resolved against every known workspace directory, so
@@ -31,6 +33,13 @@ const OPEN_ROUTE = '/link-menu/open';
 const RESOLVE_ROUTE = '/link-menu/resolve';
 /** Route that reports where relative references resolve from. */
 const INFO_ROUTE = '/link-menu/info';
+/** Route that returns a text file's content, for "copy file content". */
+const READ_ROUTE = '/link-menu/read';
+/** Route that copies a file through the system save dialog. */
+const SAVE_ROUTE = '/link-menu/save-as';
+
+/** Upper bound for a file that may be copied as text. */
+const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 
 /** Upper bound for a JSON request body. */
 const MAX_BODY_BYTES = 256 * 1024;
@@ -121,6 +130,62 @@ function candidateRoots(ctx) {
 }
 
 /**
+ * Find a bare file name inside a set of directories, one and two levels down.
+ *
+ * Chat attachments are uploaded next to the profile instead of into a workspace
+ * (for example `<profile>/amp_hw/report.pdf`), so a workspace-only lookup would
+ * never resolve the file card they render.
+ */
+async function searchBasesForName(bases, name) {
+  for (const base of bases) {
+    let entries;
+    try {
+      entries = await readdir(base, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    // Profiles can hold hundreds of session folders; the first 400 are plenty.
+    for (const entry of entries.slice(0, 400)) {
+      const candidate = join(base, entry.name);
+      if (entry.isFile() && entry.name === name) return candidate;
+      if (!entry.isDirectory()) continue;
+      try {
+        const nested = await readdir(candidate, { withFileTypes: true });
+        for (const child of nested.slice(0, 200)) {
+          if (child.isFile() && child.name === name) return join(candidate, child.name);
+        }
+      } catch {
+        // unreadable folder, keep scanning
+      }
+    }
+  }
+  return undefined;
+}
+
+/** Directories that may hold uploaded chat attachments. */
+function attachmentBases(ctx) {
+  const bases = [];
+  const push = (value) => {
+    if (typeof value !== 'string') return;
+    const dir = value.trim().replace(/[\\/]+$/, '');
+    if (dir.length === 0 || !PATH_PATTERN.test(dir)) return;
+    if (!bases.includes(dir)) bases.push(dir);
+  };
+  try {
+    const profile = ctx?.workingDirectory?.defaultDirectory;
+    push(profile);
+    if (typeof profile === 'string' && profile.length > 0) {
+      const normalized = profile.replace(/[\\/]+$/, '');
+      push(dirname(normalized));
+      push(join(dirname(dirname(normalized)), 'sessions'));
+    }
+  } catch {
+    // optional
+  }
+  return bases;
+}
+
+/**
  * Resolve a file reference that may be absolute, a `file://` URL, or a path
  * relative to one of the known workspace directories.
  * @returns {Promise<string | undefined>} an absolute path that exists.
@@ -171,6 +236,10 @@ async function resolveLoosePath(ctx, target) {
         }
       }
     }
+  }
+  if (!/[\\/]/.test(relative)) {
+    const attachments = await searchBasesForName(attachmentBases(ctx), relative);
+    if (attachments !== undefined) return attachments;
   }
   return undefined;
 }
@@ -684,6 +753,160 @@ async function handleResolve(req, res, ctx) {
   json(res, 200, { ok: true, path: resolved });
 }
 
+/** Handle POST /link-menu/read: the UTF-8 text content of one local file. */
+async function handleRead(req, res, ctx) {
+  if (req.method !== 'POST') {
+    json(res, 405, { ok: false, error: 'method-not-allowed' });
+    return;
+  }
+  const contentType = String(req.headers['content-type'] ?? '');
+  if (!contentType.toLowerCase().includes('application/json')) {
+    json(res, 415, { ok: false, error: 'unsupported-media-type' });
+    return;
+  }
+  let payload;
+  try {
+    payload = JSON.parse((await readBody(req, MAX_BODY_BYTES)) || '{}');
+  } catch {
+    json(res, 400, { ok: false, error: 'bad-json' });
+    return;
+  }
+  const target = typeof payload?.target === 'string' ? payload.target : '';
+  const resolved = await resolveLoosePath(ctx, target);
+  if (resolved === undefined) {
+    json(res, 404, { ok: false, error: 'not-found' });
+    return;
+  }
+  try {
+    const info = await stat(resolved);
+    if (!info.isFile()) {
+      json(res, 400, { ok: false, error: 'not-a-file' });
+      return;
+    }
+    if (info.size > MAX_TEXT_BYTES) {
+      json(res, 413, { ok: false, error: 'too-large', size: info.size });
+      return;
+    }
+    const buffer = await readFile(resolved);
+    // A NUL byte in the first block means this is not text; copying it would
+    // only produce mojibake on the clipboard.
+    if (buffer.subarray(0, 8192).includes(0)) {
+      json(res, 415, { ok: false, error: 'binary' });
+      return;
+    }
+    json(res, 200, { ok: true, path: resolved, text: buffer.toString('utf8') });
+  } catch (error) {
+    json(res, 400, { ok: false, error: String(error?.message ?? 'failed') });
+  }
+}
+
+/** PowerShell helper that copies a file through the native save dialog. */
+const SAVE_AS_SCRIPT = `
+Add-Type -AssemblyName System.Windows.Forms
+$src = $env:LM_SAVE_SOURCE
+$dialog = New-Object System.Windows.Forms.SaveFileDialog
+$dialog.Title = 'Save a copy'
+$dialog.FileName = [System.IO.Path]::GetFileName($src)
+$dialog.InitialDirectory = [System.IO.Path]::GetDirectoryName($src)
+$extension = [System.IO.Path]::GetExtension($src)
+if ($extension.Length -gt 1) {
+  $dialog.Filter = ('Files (*' + $extension + ')|*' + $extension + '|All files (*.*)|*.*')
+}
+$dialog.OverwritePrompt = $true
+$dialog.TopMost = $true
+try {
+  $result = $dialog.ShowDialog()
+  if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+    Copy-Item -LiteralPath $src -Destination $dialog.FileName -Force
+    [Console]::Out.WriteLine('SAVED:' + $dialog.FileName)
+  } else {
+    [Console]::Out.WriteLine('CANCELLED')
+  }
+} finally {
+  $dialog.Dispose()
+}
+`;
+
+/** Ask the user for a destination and copy the file there. */
+function saveAsDialog(source) {
+  return new Promise((resolve) => {
+    const script = Buffer.from(SAVE_AS_SCRIPT, 'utf16le').toString('base64');
+    const child = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-STA', '-EncodedCommand', script], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      env: { ...launchEnv(), LM_SAVE_SOURCE: source },
+    });
+    let output = '';
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // already gone
+      }
+      resolve({ saved: false, cancelled: false, error: 'timeout' });
+    }, 240000);
+    child.stdout.on('data', (chunk) => {
+      output += chunk.toString('utf8');
+    });
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve({ saved: false, cancelled: false, error: 'spawn-failed' });
+    });
+    child.on('exit', () => {
+      clearTimeout(timer);
+      const match = /SAVED:(.+)/.exec(output);
+      if (match) {
+        resolve({ saved: true, cancelled: false, path: match[1].trim() });
+        return;
+      }
+      if (/CANCELLED/.test(output)) resolve({ saved: false, cancelled: true });
+      else resolve({ saved: false, cancelled: false, error: 'no-result' });
+    });
+  });
+}
+
+/** Handle POST /link-menu/save-as: copy one file to a user-chosen destination. */
+async function handleSaveAs(req, res, ctx) {
+  if (req.method !== 'POST') {
+    json(res, 405, { ok: false, error: 'method-not-allowed' });
+    return;
+  }
+  const contentType = String(req.headers['content-type'] ?? '');
+  if (!contentType.toLowerCase().includes('application/json')) {
+    json(res, 415, { ok: false, error: 'unsupported-media-type' });
+    return;
+  }
+  let payload;
+  try {
+    payload = JSON.parse((await readBody(req, MAX_BODY_BYTES)) || '{}');
+  } catch {
+    json(res, 400, { ok: false, error: 'bad-json' });
+    return;
+  }
+  const target = typeof payload?.target === 'string' ? payload.target : '';
+  const resolved = await resolveLoosePath(ctx, target);
+  if (resolved === undefined) {
+    json(res, 404, { ok: false, error: 'not-found' });
+    return;
+  }
+  try {
+    const info = await stat(resolved);
+    if (!info.isFile()) {
+      json(res, 400, { ok: false, error: 'not-a-file' });
+      return;
+    }
+  } catch {
+    json(res, 404, { ok: false, error: 'not-found' });
+    return;
+  }
+  if (process.platform !== 'win32') {
+    json(res, 501, { ok: false, error: 'unsupported-platform' });
+    return;
+  }
+  const result = await saveAsDialog(resolved);
+  json(res, 200, { ok: true, ...result, source: resolved });
+}
+
 /** Handle GET /link-menu/info: the base directory of relative references. */
 function handleInfo(req, res, ctx) {
   if (req.method !== 'GET') {
@@ -730,6 +953,14 @@ export function apply(ctx, config) {
   ctx.effect(
     () => ctx.webServer.register({ kind: 'exact', path: INFO_ROUTE, handler: (req, res) => handleInfo(req, res, ctx) }),
     'link-menu: info route',
+  );
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'exact', path: READ_ROUTE, handler: (req, res) => handleRead(req, res, ctx) }),
+    'link-menu: read route',
+  );
+  ctx.effect(
+    () => ctx.webServer.register({ kind: 'exact', path: SAVE_ROUTE, handler: (req, res) => handleSaveAs(req, res, ctx) }),
+    'link-menu: save-as route',
   );
   // Boot the window helper eagerly: the first reveal/focus should not pay for
   // the PowerShell start-up and the C# compile (about 1.5-2s otherwise).
