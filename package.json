@@ -11,6 +11,15 @@
     "electron"
   ],
   "license": "MIT",
+  "author": "肥鱼",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Xchcy/DSH-Reflex.git"
+  },
+  "homepage": "https://github.com/Xchcy/DSH-Reflex#readme",
+  "bugs": {
+    "url": "https://github.com/Xchcy/DSH-Reflex/issues"
+  },
   "type": "module",
   "exports": {
     ".": "./index.js",

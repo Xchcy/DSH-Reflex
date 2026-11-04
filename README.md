@@ -4,6 +4,8 @@
 
 A ChatGPT-like right-click menu for links and file references inside DeepSeek Harness (DSH) desktop messages.
 
+仓库 / Repository：<https://github.com/Xchcy/DSH-Reflex> · 市场条目 / Market entry：`ui` 分类，[awesome-dsh-plugin](https://awesome-dsh-plugin.com)
+
 ---
 
 ## 功能 / Features
@@ -36,11 +38,23 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 
 要求：DSH **桌面版**（Electron）。「默认打开方式 / 在文件管理器中打开」由 Host 进程调用系统能力，浏览器版 DSH 无法提供。
 
-1. 解压或克隆到本机任意目录，例如：
+### 方式一：插件市场（推荐）
 
-   ```text
-   D:\dsh-plugins\dsh-link-menu
-   ```
+DSH 桌面版的 **Plugins → Discover** 里搜索 `dsh-link-menu` 或 `Xchcy`，点安装，然后重启应用。市场索引见 [awesome-dsh-plugin](https://awesome-dsh-plugin.com)。
+
+### 方式二：从 GitHub 安装
+
+```sh
+dsh plugin add github:Xchcy/DSH-Reflex
+# 钉住版本
+dsh plugin add github:Xchcy/DSH-Reflex#v0.2.1
+```
+
+git 源首次安装需要按提示允许构建；也可以在 GUI 的 Plugins 页面粘贴仓库地址安装。
+
+### 方式三：本地路径（开发调试用）
+
+1. 解压或克隆到本机任意目录，例如 `D:\dsh-plugins\dsh-link-menu`。
 
 2. 在 DSH 会话里安装本地 bundle：
 
@@ -51,7 +65,7 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 
    `target` 必须是**绝对路径**。安装成功后 `application` 为 `applied`、`warnings` 为空数组。
 
-3. 重启 DSH 应用（客户端半边需要重新加载），右键菜单即可使用。
+无论哪种方式，装完都要**重启 DSH 应用**（客户端半边需要重新加载），右键菜单才会出现。
 
 ## 配置 / Configuration
 
@@ -96,6 +110,8 @@ locale/*.json      插件名称与描述（plugin_manager 展示用）
 cordis.patch.yml   挂载配置
 build.mjs          打包脚本，生成 dist/dsh-link-menu-<version>.zip
 test/host-routes.mjs  Host 路由冒烟测试（只测拒绝路径，不启动任何应用）
+market/            插件市场（awesome-dsh-plugin）的收录条目
+scripts/publish-market.mjs  提交收录条目并开 PR 的脚本
 ```
 
 改动后先查语法：
@@ -108,10 +124,20 @@ node test/host-routes.mjs
 
 Host 半边改动可在 DSH 里 `plugin_manager set_plugin`（`include:link-menu` 关→开）热重载；client 半边改动需要重启应用。
 
-发版：改 `package.json` 的 `version`，再打包，`dist/` 已被 `.gitignore` 忽略：
+发版：改 `package.json` 的 `version`，再打包（`dist/` 已被 `.gitignore` 忽略）：
 
 ```powershell
-node build.mjs
+node build.mjs                 # dist/dsh-link-menu-<version>.zip
+npm pack --pack-destination dist
+```
+
+Release 上要传的 tarball 资产名固定为 `dsh-link-menu.tgz`（不带版本号），市场条目用 `releases/latest/download/dsh-link-menu.tgz` 指向它；换了版本号就重新打一次、覆盖同名资产。
+
+市场收录：`market/Xchcy__DSH-Reflex.yml` 是提交给 awesome-dsh-plugin 的唯一条目文件；用脚本提交（仓库创建满 1 天后才会过 CI）：
+
+```powershell
+node scripts/publish-market.mjs --dry-run   # 先看会做什么
+node scripts/publish-market.mjs             # fork + 提交条目 + 开 PR
 ```
 
 ## License
