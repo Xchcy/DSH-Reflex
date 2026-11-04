@@ -18,6 +18,12 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 - 只在真正命中链接/文件引用时接管右键；普通文本仍是系统默认菜单。
 - 菜单跟随主题变量（`--dsw-*`），浅色/深色主题都能用。
 
+## 0.2.1 的改动 / What's new in 0.2.1
+
+- 清理：`focusWindowByTitle` 两处无效的第二个参数（该函数只接收标题提示），行为不变。
+- 清理：`fileRows` 的注释改成实际的三行；第四行「复制文件名」由调用处追加。
+- 打包可复现：新增 `build.mjs`，按固定清单、固定时间戳生成 `dist/dsh-link-menu-<version>.zip`，同样的源码两次打包结果一致。
+
 ## 0.2.0 的改动 / What's new in 0.2.0
 
 - 文件菜单固定为 4 行：**默认打开方式 / 在文件管理器中打开 / 复制文件地址 / 复制文件名**。
@@ -86,11 +92,12 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 ```text
 index.js           Host 半边：/link-menu/open（打开/定位）、/link-menu/resolve（跨工作区解析路径）、/link-menu/info（解析根目录与 VS Code 探测）
 client.js          浏览器半边：捕获右键、识别链接/文件、绘制菜单
-locale/*.json      插件名称与描述
+locale/*.json      插件名称与描述（plugin_manager 展示用）
 cordis.patch.yml   挂载配置
+build.mjs          打包脚本，生成 dist/dsh-link-menu-<version>.zip
 ```
 
-改动后：
+改动后先查语法：
 
 ```powershell
 node --check index.js
@@ -98,6 +105,12 @@ node --check client.js
 ```
 
 Host 半边改动可在 DSH 里 `plugin_manager set_plugin`（`include:link-menu` 关→开）热重载；client 半边改动需要重启应用。
+
+发版：改 `package.json` 的 `version`，再打包，`dist/` 已被 `.gitignore` 忽略：
+
+```powershell
+node build.mjs
+```
 
 ## License
 

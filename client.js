@@ -407,7 +407,7 @@ window.__ModuleLoader__.load({
       return item;
     }
 
-    /** The four file rows: open, reveal, copy path, copy name. */
+    /** The three rows every file reference shares; the caller appends "copy file name". */
     function fileRows(target, absoluteCopy) {
       return [
         menuItem(t('openDefault'), () => openTarget('file', target)),
@@ -431,7 +431,7 @@ window.__ModuleLoader__.load({
         ];
       }
       if (target.kind === 'relpath') {
-        const relative = stripLineSuffix(target.target);
+        const relative = target.target;
         return [
           ...fileRows(relative, async () => copyText(await resolveRelative(relative))),
           menuItem(t('copyName'), () => copyText(baseName(relative))),

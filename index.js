@@ -588,7 +588,7 @@ async function openPath(kind, target) {
     // one): let the shell show its "How do you want to open this file?" dialog.
     if (process.platform === 'win32') {
       launch('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', path]);
-      focusWindowByTitle(CHOOSER_HINTS, { attempts: 12, delayMs: 400 });
+      focusWindowByTitle(CHOOSER_HINTS);
     } else if (process.platform === 'darwin') launch('open', ['-a', path]);
     else launch('xdg-open', [path]);
     return 'choose';
@@ -605,7 +605,7 @@ async function openPath(kind, target) {
         return 'code';
       }
       launch('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', path]);
-      focusWindowByTitle(CHOOSER_HINTS, { attempts: 12, delayMs: 400 });
+      focusWindowByTitle(CHOOSER_HINTS);
       return 'choose';
     }
     launch('rundll32.exe', ['url.dll,FileProtocolHandler', path]);
