@@ -1,8 +1,8 @@
 # 挂载 dsh-link-menu。Mounts the plugin into a DSH profile.
 #
-# workspaceRoot 可选：设置后，消息里的相对文件引用（如 `src/main.ts`）会按它解析，
-# 并可参与“打开 / 在资源管理器中显示”。不设置时回退到 DSH 工作目录。
-# workspaceRoot is optional; defaults to the DSH working directory.
+# workspaceRoot 可选：设置后，消息里的相对文件引用（如 `src/main.ts`）会优先按它解析。
+# 不设置时依次尝试 DSH 的所有工作区目录、工作目录默认值、Host 进程当前目录。
+# workspaceRoot is optional; when omitted, every known DSH workspace is tried first.
 - insert:
     - id: link-menu
       name: dsh-link-menu

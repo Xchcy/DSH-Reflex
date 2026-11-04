@@ -28,11 +28,16 @@ window.__ModuleLoader__.load({
     const zh = {
       copyLink: '复制链接地址',
       openExternal: '在默认浏览器中打开',
-      openDefault: '用默认应用打开',
-      reveal: '在文件资源管理器中显示',
-      copyPath: '复制文件路径',
+      openDefault: '默认打开方式',
+      reveal: '在文件管理器中打开',
+      copyPath: '复制文件地址',
       copyName: '复制文件名',
       openFailed: '无法打开',
+      opened: '已用默认应用打开',
+      openedCode: '已用 VS Code 打开',
+      revealed: '已在资源管理器中打开',
+      choosing: '已打开「选择打开方式」',
+      copied: '已复制',
     };
     const en = {
       copyLink: 'Copy link address',
@@ -42,6 +47,11 @@ window.__ModuleLoader__.load({
       copyPath: 'Copy file path',
       copyName: 'Copy file name',
       openFailed: 'Could not open',
+      opened: 'Opened with the default app',
+      openedCode: 'Opened with VS Code',
+      revealed: 'Shown in File Explorer',
+      choosing: 'Opened the “choose an app” dialog',
+      copied: 'Copied',
     };
 
     /**
@@ -62,7 +72,36 @@ window.__ModuleLoader__.load({
       '.DLM_item:hover,.DLM_item:focus-visible{background:var(--dsw-alias-interactive-bg-hover);',
       'color:var(--dsw-alias-label-primary)}',
       '.DLM_item:active{opacity:.85}',
+      '.DLM_toast{position:fixed;right:16px;bottom:16px;z-index:2147483001;',
+      'max-width:min(360px,calc(100vw - 32px));box-sizing:border-box;padding:8px 12px;',
+      'border-radius:10px;border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1));',
+      'background:var(--dsw-alias-bg-overlay,var(--dsw-alias-bg-layer-2,#fff));',
+      'box-shadow:var(--dsw-elevation-prominent,0 8px 24px rgba(0,0,0,.16));',
+      'color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;',
+      'font-family:inherit;pointer-events:none;opacity:0;transition:opacity .15s ease}',
+      '.DLM_toast[data-visible="1"]{opacity:1}',
     ].join('');
+
+    let toastElement = null;
+    let toastTimer = 0;
+
+    /** Brief bottom-right confirmation so the user can see the action fired. */
+    function toast(text) {
+      if (typeof text !== 'string' || text.length === 0) return;
+      if (!toastElement || !toastElement.isConnected) {
+        toastElement = document.createElement('div');
+        toastElement.className = 'DLM_toast';
+        toastElement.setAttribute('role', 'status');
+        toastElement.setAttribute('aria-live', 'polite');
+        document.body.appendChild(toastElement);
+      }
+      toastElement.textContent = text;
+      toastElement.setAttribute('data-visible', '1');
+      window.clearTimeout(toastTimer);
+      toastTimer = window.setTimeout(() => {
+        toastElement?.setAttribute('data-visible', '0');
+      }, 2600);
+    }
 
     /** Style element inserted once per page. */
     let styleElement = null;
@@ -127,6 +166,14 @@ window.__ModuleLoader__.load({
       if (!(element instanceof Element)) return null;
       const className = typeof element.className === 'string' ? element.className : '';
       if (FILE_LINK.test(className)) {
+        // The shipped chip carries the authored absolute path in `title`, which
+        // is more precise than the visible (possibly bare) file name.
+        for (const name of ['title', 'data-path', 'data-file-path', 'aria-label']) {
+          const value = element.getAttribute(name);
+          if (!value) continue;
+          const found = pathFrom(value);
+          if (found) return found;
+        }
         const text = (element.textContent ?? '').trim();
         if (text.length > 0 && text.length < 4096 && !text.includes('\n')) {
           const found = pathFrom(text);
@@ -172,6 +219,15 @@ window.__ModuleLoader__.load({
           if (REL_PATH.test(text) && !/^[a-z]+:\/\//i.test(text)) {
             return { kind: 'relpath', target: stripLineSuffix(text) };
           }
+          // A file chip may render as an inline `code` element (or a plain
+          // clickable span) that shows only the bare file name.
+          if (
+            BARE_FILE.test(text) &&
+            text.length <= 120 &&
+            (element.tagName === 'CODE' || element.closest('button,a,[role="button"]'))
+          ) {
+            return { kind: 'relpath', target: stripLineSuffix(text) };
+          }
         }
       }
       return null;
@@ -195,6 +251,7 @@ window.__ModuleLoader__.load({
       try {
         if (navigator.clipboard?.writeText) {
           await navigator.clipboard.writeText(text);
+          toast(t('copied'));
           return;
         }
       } catch {
@@ -213,10 +270,12 @@ window.__ModuleLoader__.load({
         // nothing else to try
       }
       area.remove();
+      toast(t('copied'));
     }
 
     /** Ask the Host to hand the target to the operating system. */
     async function openTarget(kind, target) {
+      let status = 0;
       try {
         const response = await fetch(OPEN_ROUTE, {
           method: 'POST',
@@ -224,8 +283,20 @@ window.__ModuleLoader__.load({
           body: JSON.stringify({ kind, target }),
           cache: 'no-store',
         });
-        if (!response.ok) throw new Error(`open failed: ${response.status}`);
+        status = response.status;
+        const via = response.headers?.get?.('x-link-menu-via') || kind;
+        if (!response.ok) throw new Error(`open failed: ${status}`);
+        toast(
+          via === 'reveal'
+            ? t('revealed')
+            : via === 'code'
+              ? t('openedCode')
+              : via === 'choose'
+                ? t('choosing')
+                : t('opened'),
+        );
       } catch (error) {
+        toast(status === 0 ? t('openFailed') : `${t('openFailed')} (${status})`);
         console.warn(`[link-menu] ${t('openFailed')}`, error);
       }
     }
@@ -336,6 +407,15 @@ window.__ModuleLoader__.load({
       return item;
     }
 
+    /** The four file rows: open, reveal, copy path, copy name. */
+    function fileRows(target, absoluteCopy) {
+      return [
+        menuItem(t('openDefault'), () => openTarget('file', target)),
+        menuItem(t('reveal'), () => openTarget('reveal', target)),
+        menuItem(t('copyPath'), absoluteCopy),
+      ];
+    }
+
     /** Rows for the resolved target. */
     function rowsFor(target) {
       if (target.kind === 'url') {
@@ -346,18 +426,15 @@ window.__ModuleLoader__.load({
       }
       if (target.kind === 'file') {
         return [
-          menuItem(t('openDefault'), () => openTarget('file', target.target)),
-          menuItem(t('reveal'), () => openTarget('reveal', target.target)),
-          menuItem(t('copyPath'), () => copyText(displayPath(target.target))),
+          ...fileRows(target.target, () => copyText(displayPath(target.target))),
           menuItem(t('copyName'), () => copyText(baseName(target.target))),
         ];
       }
       if (target.kind === 'relpath') {
         const relative = stripLineSuffix(target.target);
         return [
-          menuItem(t('openDefault'), () => openTarget('file', relative)),
-          menuItem(t('reveal'), () => openTarget('reveal', relative)),
-          menuItem(t('copyPath'), async () => copyText(await resolveRelative(relative))),
+          ...fileRows(relative, async () => copyText(await resolveRelative(relative))),
+          menuItem(t('copyName'), () => copyText(baseName(relative))),
         ];
       }
       return [menuItem(t('copyPath'), () => copyText(target.target))];

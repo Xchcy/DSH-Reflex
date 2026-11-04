@@ -1,7 +1,8 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -87,7 +88,10 @@ function resolvePath(target) {
       return undefined;
     }
   }
-  return PATH_PATTERN.test(value) ? value : undefined;
+  if (!PATH_PATTERN.test(value)) return undefined;
+  // The shell launchers expect native separators: a chip may carry `C:/a/b`,
+  // while Windows explorer and rundll32 expect backslashes before launching.
+  return normalize(value);
 }
 
 /** Candidate base directories for a relative reference, most useful first. */
@@ -171,11 +175,381 @@ async function resolveLoosePath(ctx, target) {
   return undefined;
 }
 
+/**
+ * The Host runs with `ELECTRON_RUN_AS_NODE=1` (it is spawned by the Electron
+ * app as a plain Node process). A child Electron app such as VS Code inherits
+ * that variable, boots as Node, prints its version and exits, so nothing opens.
+ * Strip the Electron control variables before launching anything.
+ */
+function launchEnv() {
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  delete env.ELECTRON_NO_ATTACH_CONSOLE;
+  delete env.ELECTRON_ENABLE_LOGGING;
+  delete env.ELECTRON_DEBUG_NOTIFICATIONS;
+  return env;
+}
+
 /** Start a detached, fire-and-forget process. */
-function launch(command, args) {
-  const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
+function launch(command, args, options = {}) {
+  const child = spawn(command, args, {
+    detached: true,
+    stdio: 'ignore',
+    // `windowsHide: true` sets STARTF_USESHOWWINDOW/SW_HIDE in the child's
+    // STARTUPINFO. Electron apps inherit it and create their main window
+    // hidden (VS Code opened the file but never showed the window), so only
+    // console helpers such as the focus script may be hidden.
+    windowsHide: options.hidden === true,
+    env: launchEnv(),
+  });
   child.on('error', () => {});
   child.unref();
+}
+
+/**
+ * Windows refuses SetForegroundWindow from a background process (the
+ * foreground lock) and a fresh PowerShell costs about 0.6 s of startup, which
+ * is what made "reveal in Explorer" feel slow. One trimmed helper process is
+ * started on demand, keeps the P/Invoke type compiled, and receives one short
+ * command per interaction. It only lives as long as the Host.
+ */
+const WIN_HELPER_SCRIPT = `
+$ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
+$lmApi = @'
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public class LMWin {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+  public static List<IntPtr> FindByTitle(string[] hints) {
+    var found = new List<IntPtr>();
+    EnumWindows((h, l) => {
+      if (!IsWindowVisible(h)) return true;
+      var sb = new StringBuilder(512);
+      GetWindowText(h, sb, 512);
+      string title = sb.ToString();
+      if (title.Length == 0) return true;
+      foreach (var hint in hints) {
+        if (hint.Length > 0 && title.IndexOf(hint, StringComparison.OrdinalIgnoreCase) >= 0) { found.Add(h); break; }
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+  public static IntPtr FindExplorer(string part) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, l) => {
+      if (!IsWindowVisible(h)) return true;
+      var cls = new StringBuilder(256);
+      GetClassName(h, cls, 256);
+      string name = cls.ToString();
+      if (name != "CabinetWClass" && name != "ExploreWClass") return true;
+      var sb2 = new StringBuilder(512);
+      GetWindowText(h, sb2, 512);
+      if (sb2.ToString().IndexOf(part, StringComparison.OrdinalIgnoreCase) >= 0) { found = h; return false; }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+}
+'@
+try { Add-Type -TypeDefinition $lmApi -Language CSharp | Out-Null } catch {}
+
+function Activate-LmWindow {
+  param([IntPtr]$Handle)
+  if ($Handle -eq [IntPtr]::Zero) { return $false }
+  for ($i = 0; $i -lt 3; $i++) {
+    if ([LMWin]::GetForegroundWindow() -eq $Handle) { [LMWin]::ShowWindow($Handle, 9) | Out-Null; return $true }
+    [LMWin]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+    Start-Sleep -Milliseconds 25
+    [LMWin]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+    [LMWin]::ShowWindow($Handle, 9) | Out-Null
+    if ([LMWin]::SetForegroundWindow($Handle)) { return $true }
+    Start-Sleep -Milliseconds 80
+  }
+  return $false
+}
+
+function Get-LmExplorerHandle {
+  param([string]$Folder)
+  try {
+    $shell = New-Object -ComObject Shell.Application
+    foreach ($window in $shell.Windows()) {
+      try {
+        if ([string]$window.Document.Folder.Self.Path -eq $Folder) { return [IntPtr]$window.HWND }
+      } catch {}
+    }
+  } catch {}
+  return [IntPtr]::Zero
+}
+
+function Get-LmShell {
+  if ($null -eq $global:lmShell) {
+    try { $global:lmShell = New-Object -ComObject Shell.Application } catch { $global:lmShell = $null }
+  }
+  return $global:lmShell
+}
+
+function Start-LmExplorerSelect {
+  param([string]$Path)
+  try {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = Join-Path $env:WINDIR 'explorer.exe'
+    $psi.Arguments = '/select,"' + $Path + '"'
+    $psi.UseShellExecute = $false
+    [System.Diagnostics.Process]::Start($psi) | Out-Null
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+function Invoke-LmReveal {
+  param([string]$Path, [string]$Folder)
+  # Fast path: a user32 title lookup costs a few milliseconds, while
+  # Shell.Application enumeration of many open windows takes ~0.7 s.
+  $leaf = Split-Path -Leaf $Folder
+  $handle = [LMWin]::FindExplorer($leaf)
+  if ($handle -ne [IntPtr]::Zero) { Activate-LmWindow $handle | Out-Null; return }
+  # Shell.Application.Explore reuses the folder window when one exists and
+  # opens a new one in ~0.5 s; a fresh explorer.exe process costs ~1.5 s here.
+  $opened = $false
+  $shell = Get-LmShell
+  if ($null -ne $shell) {
+    try { $shell.Explore($Folder); $opened = $true } catch { $opened = $false }
+  }
+  if (-not $opened) { $opened = Start-LmExplorerSelect -Path $Path }
+  if (-not $opened) { return }
+  for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Milliseconds 50
+    $handle = [LMWin]::FindExplorer($leaf)
+    if ($handle -ne [IntPtr]::Zero) { Activate-LmWindow $handle | Out-Null; return }
+  }
+  $handle = Get-LmExplorerHandle -Folder $Folder
+  if ($handle -ne [IntPtr]::Zero) { Activate-LmWindow $handle | Out-Null }
+}
+
+function Invoke-LmFocusTitle {
+  param([string[]]$Hints)
+  for ($i = 0; $i -lt 12; $i++) {
+    Start-Sleep -Milliseconds 150
+    $targets = [LMWin]::FindByTitle($Hints)
+    if ($targets.Count -eq 0) { continue }
+    if (Activate-LmWindow $targets[$targets.Count - 1]) { return }
+  }
+}
+
+function Invoke-LmAction {
+  param([string]$Kind, [string]$PathB64, [string]$FolderB64, [string]$HintsB64)
+  try {
+    if ($Kind -eq 'reveal') {
+      $path = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($PathB64))
+      $folder = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($FolderB64))
+      Invoke-LmReveal -Path $path -Folder $folder
+    } elseif ($Kind -eq 'focus') {
+      $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($HintsB64))
+      $hints = @($json | ConvertFrom-Json)
+      if ($hints.Count -gt 0) { Invoke-LmFocusTitle -Hints $hints }
+    }
+  } catch {}
+}
+
+while ($true) {
+  $lmLine = [Console]::In.ReadLine()
+  if ($null -eq $lmLine) { break }
+  $lmText = $lmLine.Trim()
+  if ($lmText.Length -gt 0) { try { Invoke-Expression $lmText } catch {} }
+}
+`;
+
+let winHelper = null;
+
+function winHelperStart() {
+  if (process.platform !== 'win32') return null;
+  try {
+    const encoded = Buffer.from(WIN_HELPER_SCRIPT, 'utf16le').toString('base64');
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded],
+      { stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true, env: launchEnv() },
+    );
+    child.on('error', () => {
+      if (winHelper === child) winHelper = null;
+    });
+    child.on('exit', () => {
+      if (winHelper === child) winHelper = null;
+    });
+    child.unref();
+    return child;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Send one command line to the helper. When the helper cannot be started the
+ * same script is run once after the boot script (the one-shot process reads
+ * EOF on stdin immediately, so the appended command still runs).
+ */
+function winHelperSend(command) {
+  if (process.platform !== 'win32') return false;
+  try {
+    if (winHelper === null) winHelper = winHelperStart();
+    if (winHelper !== null && winHelper.stdin !== null && winHelper.stdin.writable) {
+      winHelper.stdin.write(`${command}\n`);
+      return true;
+    }
+  } catch {
+    winHelper = null;
+  }
+  try {
+    const encoded = Buffer.from(`${WIN_HELPER_SCRIPT}\n${command}\n`, 'utf16le').toString('base64');
+    launch('powershell.exe', ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded], {
+      hidden: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function winHelperStop() {
+  const child = winHelper;
+  winHelper = null;
+  if (child === null) return;
+  try {
+    child.stdin.end();
+  } catch {
+    // The pipe may already be gone.
+  }
+  try {
+    child.kill();
+  } catch {
+    // Nothing left to terminate.
+  }
+}
+
+const toBase64Utf8 = (value) => Buffer.from(String(value), 'utf8').toString('base64');
+
+/**
+ * Raise the window of an app that was just started (VS Code, the default
+ * editor, the Windows "choose an app" dialog). The helper keeps looking for
+ * the window while the background process creates it.
+ */
+function focusWindowByTitle(titleHints) {
+  if (process.platform !== 'win32') return;
+  const hints = (Array.isArray(titleHints) ? titleHints : [titleHints]).filter(
+    (value) => typeof value === 'string' && value.length > 0,
+  );
+  if (hints.length === 0) return;
+  winHelperSend(`Invoke-LmAction -Kind focus -HintsB64 '${toBase64Utf8(JSON.stringify(hints))}'`);
+}
+
+/**
+ * Reveal a path in Explorer. When a window already shows that folder the
+ * helper selects the item there and raises it (no second window, no explorer
+ * start-up cost); otherwise it starts Explorer once and focuses the window.
+ */
+function revealInExplorer(path, folder) {
+  if (process.platform !== 'win32') return false;
+  return winHelperSend(
+    `Invoke-LmAction -Kind reveal -PathB64 '${toBase64Utf8(path)}' -FolderB64 '${toBase64Utf8(folder)}'`,
+  );
+}
+
+/** Titles the Windows "choose an app" dialog uses in the common locales. */
+const CHOOSER_HINTS = ['选取应用', '打开方式', 'How do you want to open', 'Select an app', 'Öffnen mit', 'Ouvrir avec'];
+
+const associationCache = new Map();
+
+/** Default (unnamed) string value of one registry key, or an empty string. */
+function regDefaultValue(key) {
+  try {
+    const result = spawnSync('reg.exe', ['query', key, '/ve'], { windowsHide: true, timeout: 4000 });
+    if (result.status !== 0 || !result.stdout) return '';
+    const match = result.stdout.toString('utf8').match(/\(Default\)\s+REG_SZ\s+(.+)/);
+    return match ? match[1].trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Whether Windows really has a default app for this extension. An extension
+ * may point at a ProgId left behind by an uninstalled app (Adobe After Effects
+ * leaves `.json` pointing at a missing ProgId), so the ProgId has to own an
+ * open command before the shell can launch anything.
+ */
+function hasAssociation(extension) {
+  if (process.platform !== 'win32') return true;
+  const ext = extension.toLowerCase();
+  if (associationCache.has(ext)) return associationCache.get(ext);
+  let associated = true;
+  if (ext.length > 1) {
+    let progId = '';
+    try {
+      const userChoice = spawnSync(
+        'reg.exe',
+        ['query', `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\${ext}\\UserChoice`, '/v', 'ProgId'],
+        { windowsHide: true, timeout: 4000 },
+      );
+      if (userChoice.status === 0 && userChoice.stdout) {
+        const match = userChoice.stdout.toString('utf8').match(/ProgId\s+REG_SZ\s+(.+)/);
+        if (match) progId = match[1].trim();
+      }
+    } catch {
+      progId = '';
+    }
+    if (!progId) progId = regDefaultValue(`HKCR\\${ext}`);
+    associated = progId !== '' && regDefaultValue(`HKCR\\${progId}\\shell\\open\\command`) !== '';
+  }
+  associationCache.set(ext, associated);
+  return associated;
+}
+
+let vscodePath;
+
+/** Locate the VS Code executable from PATH or the usual install folders. */
+function findVSCode() {
+  if (vscodePath !== undefined) return vscodePath;
+  vscodePath = null;
+  if (process.platform !== 'win32') return vscodePath;
+  const candidates = [];
+  for (const entry of String(process.env.PATH ?? '').split(';')) {
+    const dir = entry.trim().replace(/[\\/]+$/, '');
+    if (dir.length === 0) continue;
+    if (!/[\\/]Microsoft VS Code[\\/]bin$/i.test(dir)) continue;
+    candidates.push(join(dir, '..', 'Code.exe'));
+  }
+  const local = process.env.LOCALAPPDATA;
+  if (local) candidates.push(join(local, 'Programs', 'Microsoft VS Code', 'Code.exe'));
+  if (process.env.ProgramFiles) {
+    candidates.push(join(process.env.ProgramFiles, 'Microsoft VS Code', 'Code.exe'));
+  }
+  if (process.env['ProgramFiles(x86)']) {
+    candidates.push(join(process.env['ProgramFiles(x86)'], 'Microsoft VS Code', 'Code.exe'));
+  }
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) {
+        vscodePath = normalize(candidate);
+        break;
+      }
+    } catch {
+      // keep looking
+    }
+  }
+  return vscodePath;
 }
 
 /** Open a URL with the system default browser or mail client. */
@@ -186,20 +560,59 @@ function openUrl(target) {
   else launch('xdg-open', [target]);
 }
 
-/** Open a local file with its default application, or reveal it in the file manager. */
+/** Open a local file with its default application, VS Code, the shell chooser, or reveal it. */
 async function openPath(kind, target) {
   const path = resolvePath(target);
   if (path === undefined) throw new Error('bad-path');
-  await stat(path);
+  const info = await stat(path);
   if (kind === 'reveal') {
-    if (process.platform === 'win32') launch('explorer.exe', ['/select,', path]);
-    else if (process.platform === 'darwin') launch('open', ['-R', path]);
-    else launch('xdg-open', [path]);
-    return;
+    if (process.platform === 'win32') {
+      const folder = info.isDirectory() ? path : dirname(path);
+      if (!revealInExplorer(path, folder)) launch('explorer.exe', ['/select,', path]);
+    } else if (process.platform === 'darwin') {
+      launch('open', ['-R', path]);
+    } else {
+      launch('xdg-open', [info.isDirectory() ? path : dirname(path)]);
+    }
+    return 'reveal';
   }
-  if (process.platform === 'win32') launch('rundll32.exe', ['url.dll,FileProtocolHandler', path]);
-  else if (process.platform === 'darwin') launch('open', [path]);
+  if (kind === 'code') {
+    const code = findVSCode();
+    if (code === null) throw new Error('no-vscode');
+    launch(code, [path]);
+    focusWindowByTitle(basename(path));
+    return 'code';
+  }
+  if (kind === 'choose') {
+    // Windows has no default app for this extension (or the user wants another
+    // one): let the shell show its "How do you want to open this file?" dialog.
+    if (process.platform === 'win32') {
+      launch('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', path]);
+      focusWindowByTitle(CHOOSER_HINTS, { attempts: 12, delayMs: 400 });
+    } else if (process.platform === 'darwin') launch('open', ['-a', path]);
+    else launch('xdg-open', [path]);
+    return 'choose';
+  }
+  if (process.platform === 'win32') {
+    if (!hasAssociation(extname(path))) {
+      // Nothing is registered for this extension (a leftover ProgId may still
+      // point at an uninstalled app), so the shell would open nothing at all.
+      // Prefer the editor the user almost certainly wants over a modal dialog.
+      const code = findVSCode();
+      if (code !== null) {
+        launch(code, [path]);
+        focusWindowByTitle(basename(path));
+        return 'code';
+      }
+      launch('rundll32.exe', ['shell32.dll,OpenAs_RunDLL', path]);
+      focusWindowByTitle(CHOOSER_HINTS, { attempts: 12, delayMs: 400 });
+      return 'choose';
+    }
+    launch('rundll32.exe', ['url.dll,FileProtocolHandler', path]);
+    focusWindowByTitle(basename(path));
+  } else if (process.platform === 'darwin') launch('open', [path]);
   else launch('xdg-open', [path]);
+  return 'file';
 }
 
 /** Handle POST /link-menu/open. */
@@ -222,11 +635,12 @@ async function handleOpen(req, res, ctx) {
   }
   const kind = payload?.kind;
   const target = payload?.target;
-  if (kind !== 'url' && kind !== 'file' && kind !== 'reveal') {
+  if (kind !== 'url' && kind !== 'file' && kind !== 'reveal' && kind !== 'code' && kind !== 'choose') {
     json(res, 400, { ok: false, error: 'bad-kind' });
     return;
   }
   try {
+    let via = 'url';
     if (kind === 'url') {
       openUrl(target);
     } else {
@@ -235,9 +649,9 @@ async function handleOpen(req, res, ctx) {
         json(res, 404, { ok: false, error: 'not-found' });
         return;
       }
-      await openPath(kind, resolved);
+      via = await openPath(kind, resolved);
     }
-    res.writeHead(204, { 'cache-control': 'no-store' });
+    res.writeHead(204, { 'cache-control': 'no-store', 'x-link-menu-via': via });
     res.end();
   } catch (error) {
     const code = error?.code === 'ENOENT' ? 'not-found' : String(error?.message ?? 'failed');
@@ -290,6 +704,7 @@ function handleInfo(req, res, ctx) {
     cwd: root || process.cwd(),
     home: homedir(),
     platform: process.platform,
+    vscode: Boolean(findVSCode()),
   });
 }
 
@@ -316,4 +731,10 @@ export function apply(ctx, config) {
     () => ctx.webServer.register({ kind: 'exact', path: INFO_ROUTE, handler: (req, res) => handleInfo(req, res, ctx) }),
     'link-menu: info route',
   );
+  // Boot the window helper eagerly: the first reveal/focus should not pay for
+  // the PowerShell start-up and the C# compile (about 1.5-2s otherwise).
+  ctx.effect(() => {
+    if (process.platform === 'win32' && winHelper === null) winHelper = winHelperStart();
+    return () => winHelperStop();
+  }, 'link-menu: window helper');
 }
