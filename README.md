@@ -8,6 +8,64 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 
 ---
 
+## 装它最快的方式：让 AI 帮你装
+
+不需要懂命令行。**把下面这段原样发给一个能操作你电脑的 AI**（最推荐：直接发在 DSH 对话里；也可以发给任何能读写文件、执行命令的 AI 助手）：
+
+```text
+帮我安装一个 DSH 插件，插件叫 dsh-link-menu（给消息里的链接和文件引用加右键菜单）。
+
+安装步骤：
+1. 下载 https://github.com/Xchcy/DSH-Reflex/releases/latest/download/dsh-link-menu.tgz
+   （下载不下来、或者连不上 GitHub，就先告诉我要装包，不要跳过这一步。）
+2. 把它解压/解包到一个固定目录，例如 C:\Users\Xchcy\dsh-plugins\dsh-link-menu。
+   注意：解出来的目录里要能直接看到 package.json、index.js、client.js。
+3. 用 DSH 的 plugin_manager 工具安装这个本地 bundle：
+   plugin_manager install_bundle，target 填上面那个目录的绝对路径。
+4. 安装结果显示 application 是 applied、warnings 是空数组，就算成功。
+   如果报错，把完整报错发给我，不要自己删文件。
+5. 装完提醒我：必须完全退出并重新打开 DSH 桌面应用（客户端半边要重新加载）。
+6. 重启后让我验证：在聊天里右键一个文件引用或链接，应该弹出菜单。
+   没弹出来就回来告诉你，你再去检查插件有没有加载。
+```
+
+发过去之后你只需要做两件事：**等它装完 → 重启 DSH**。
+
+### 没有 AI 可用时，手动装（三种方式，任选一种）
+
+1. **插件市场（有就最省事）**：DSH 桌面版 **Plugins → Discover** 搜 `dsh-link-menu` 或 `Xchcy`，点安装，重启应用。
+2. **从 GitHub 装**：
+
+   ```sh
+   dsh plugin add github:Xchcy/DSH-Reflex
+   # 或者钉住版本
+   dsh plugin add github:Xchcy/DSH-Reflex#v0.3.1
+   ```
+
+   也可以在 GUI 的 Plugins 页面粘贴仓库地址安装；首次从 git 装会询问是否允许构建，选允许。
+3. **从本地文件装**：把 `dist/dsh-link-menu-0.3.1.zip` 解压到任意目录（例如 `D:\dsh-plugins\dsh-link-menu`），然后在 DSH 会话里执行：
+
+   ```text
+   plugin_manager install_bundle
+   target: D:\dsh-plugins\dsh-link-menu
+   ```
+
+   `target` 必须是**绝对路径**；成功时 `application` 为 `applied`、`warnings` 为空数组。
+
+> 无论哪种方式，装完都要**完全退出再重新打开 DSH**，右键菜单才会出现。
+
+## 装完怎么确认它生效了
+
+1. 在 DSH 聊天里右键一个**蓝色链接**或**文件引用**（例如 `ocs-config.json`、`https://…`）。
+2. 应该弹出一个菜单，文件引用是 7 行：
+
+   **默认打开方式 · 打开方式… · 在文件管理器中打开 · 复制文件地址 · 复制文件名 · 复制文件内容 · 另存为…**
+
+3. 点「默认打开方式」应该能打开文件；点「在文件管理器中打开」应该弹出并选中该文件。
+4. 点完右下角会有轻提示（「已用 VS Code 打开」/「已在资源管理器中显示」/「已复制」等）。
+
+如果右键**没有任何反应**：多半是没重启，或插件没真正装进当前 profile（`application` 不是 `applied`）。把报错发给我或任意 AI，让它按上面的步骤重装。
+
 ## 功能 / Features
 
 | 对象 / Target | 菜单项 / Menu items |
@@ -17,9 +75,14 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 | 相对文件引用（如 `src/main.ts`） | 同上，按 DSH 工作区解析成绝对路径 |
 
 - 左键行为保持不变：链接照常在内置浏览器打开，文件引用照常定位。
-- 只在真正命中链接/文件引用时接管右键；普通文本仍是系统默认菜单。
+- 只在真正命中链接/文件引用时接管右键；普通文本（包括红色报错里的路径）仍是系统默认菜单。
 - 能识别消息里的文件卡片、变更文件列表行、带中文/空格的文件名，以及聊天上传的附件（不在工作区里也能解析）。
 - 菜单跟随主题变量（`--dsw-*`），浅色/深色主题都能用。
+
+## 0.3.1 的改动 / What's new in 0.3.1
+
+- README 重写：新增「让 AI 帮你装」的复制即用提示词、装完自检步骤和常见问题，面向完全没装过插件的新手。
+- 版本号、打包产物和 Release 资产同步到 0.3.1；功能与 0.3.0 相同。
 
 ## 0.3.0 的改动 / What's new in 0.3.0
 
@@ -30,12 +93,6 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 - 路径正则放宽到任意 Unicode 文件名（中文、空格、`#` 等），裸文件名会再到聊天附件目录里找一/两层。
 - `/link-menu/resolve` 新增 POST 形式（`{ path }`），旧的 GET `?path=` 保留。
 
-## 0.2.1 的改动 / What's new in 0.2.1
-
-- 清理：`focusWindowByTitle` 两处无效的第二个参数（该函数只接收标题提示），行为不变。
-- 清理：`fileRows` 的注释改成实际的三行；第四行「复制文件名」由调用处追加。
-- 打包可复现：新增 `build.mjs`，按固定清单、固定时间戳生成 `dist/dsh-link-menu-<version>.zip`，同样的源码两次打包结果一致。
-
 ## 0.2.0 的改动 / What's new in 0.2.0
 
 - 文件菜单固定为 4 行：**默认打开方式 / 在文件管理器中打开 / 复制文件地址 / 复制文件名**。
@@ -44,38 +101,22 @@ A ChatGPT-like right-click menu for links and file references inside DeepSeek Ha
 - 打开/定位后会把目标窗口提到前台（Windows 前台锁用 ALT 轻敲绕过）。
 - 所有平台行为：Windows 用 `rundll32` / `explorer` / `Shell.Application`；macOS 用 `open`；Linux 用 `xdg-open`。
 
-## 安装 / Installation
+## 常见问题 / FAQ
 
-要求：DSH **桌面版**（Electron）。「默认打开方式 / 在文件管理器中打开」由 Host 进程调用系统能力，浏览器版 DSH 无法提供。
+**右键没反应？**
+没重启，或没装进当前 profile。确认 `plugin_manager install_bundle` 返回 `application: applied`，然后完全退出 DSH 再打开。
 
-### 方式一：插件市场（推荐）
+**菜单只有几行、或行的内容和 README 不一样？**
+装的是旧版本。用上面的「让 AI 帮你装」重装最新版（0.3.1）。
 
-DSH 桌面版的 **Plugins → Discover** 里搜索 `dsh-link-menu` 或 `Xchcy`，点安装，然后重启应用。市场索引见 [awesome-dsh-plugin](https://awesome-dsh-plugin.com)。
+**「默认打开方式」弹出了「选择一个应用」？**
+说明系统里这个扩展名没有真实默认应用。可以在对话框里选一次并勾选「始终使用」，之后就会直接打开；不想每次选，用「打开方式…」或直接装 VS Code（插件会自动用它打开 `.json` 这类文件）。
 
-### 方式二：从 GitHub 安装
+**「在文件管理器中打开」第一次有点慢？**
+正常：同文件夹窗口已经开着时约 60–80ms，没开着时要等资源管理器自己建窗口，约 1 秒。
 
-```sh
-dsh plugin add github:Xchcy/DSH-Reflex
-# 钉住版本
-dsh plugin add github:Xchcy/DSH-Reflex#v0.3.0
-```
-
-git 源首次安装需要按提示允许构建；也可以在 GUI 的 Plugins 页面粘贴仓库地址安装。
-
-### 方式三：本地路径（开发调试用）
-
-1. 解压或克隆到本机任意目录，例如 `D:\dsh-plugins\dsh-link-menu`。
-
-2. 在 DSH 会话里安装本地 bundle：
-
-   ```text
-   plugin_manager install_bundle
-   target: D:\dsh-plugins\dsh-link-menu
-   ```
-
-   `target` 必须是**绝对路径**。安装成功后 `application` 为 `applied`、`warnings` 为空数组。
-
-无论哪种方式，装完都要**重启 DSH 应用**（客户端半边需要重新加载），右键菜单才会出现。
+**市场里搜不到？**
+市场 PR 可能还在排队合并（<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/12303>）。这不影响使用，按「从 GitHub 装」或「从本地文件装」即可。
 
 ## 配置 / Configuration
 
@@ -119,7 +160,7 @@ client.js          浏览器半边：捕获右键、识别链接/文件、绘制
 locale/*.json      插件名称与描述（plugin_manager 展示用）
 cordis.patch.yml   挂载配置
 build.mjs          打包脚本，生成 dist/dsh-link-menu-<version>.zip
-test/host-routes.mjs  Host 路由冒烟测试（24 项断言，只测拒绝路径，不启动任何应用/对话框）
+test/host-routes.mjs  Host 路由冒烟测试，只测拒绝路径，不启动任何应用/对话框
 market/            插件市场（awesome-dsh-plugin）的收录条目
 scripts/publish-market.mjs  提交收录条目并开 PR 的脚本
 ```

@@ -1,6 +1,6 @@
 {
   "name": "dsh-link-menu",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "ChatGPT-like right-click menu for links and file references in DeepSeek Harness (DSH) messages: open with the default app or a chosen app, reveal in the file manager, copy path, name or text content, or save a copy.",
   "keywords": [
     "dsh",
